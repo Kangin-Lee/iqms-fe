@@ -890,6 +890,17 @@ export function filterCapaRows(
   });
 }
 
+/**
+ * CAPA 번호(CP-YYYY-NNN)로 CAPA 상세 이동 키(연결 부적합 id)를 찾습니다.
+ * 못 찾으면 undefined. (챗봇 화면 이동 등에서 사용)
+ */
+export function findCapaIdByNumber(capaNumber: string): string | undefined {
+  for (const [id, plan] of capaPlanStore) {
+    if (plan.capaNumber === capaNumber) return id;
+  }
+  return undefined;
+}
+
 export async function getCapaProgress(
   statuses?: CapaStatus[]
 ): Promise<CapaProgressRow[]> {

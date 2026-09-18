@@ -318,6 +318,202 @@ async function fileToParts(file: File): Promise<GeminiPart[]> {
   ];
 }
 
+/* ------------------------------------------------------------------ */
+/* 챗봇 의도 분류 (자유 입력 → 의도 라우팅)                              */
+/* ------------------------------------------------------------------ */
+
+/** 품질 도우미가 처리하는 의도 분류 결과. */
+export type ChatIntentResult = {
+  intent:
+    | "analytics"
+    | "chart"
+    | "recommendation"
+    | "navigate"
+    | "image"
+    | "judgment"
+    | "my_work"
+    | "state_change"
+    | "chat";
+  /** intent=chart일 때 차트 주제(모르면 unknown → 되물음). */
+  chartTopic?:
+    | "myAction"
+    | "monthly"
+    | "capaStage"
+    | "ncVerdict"
+    | "eventStatus"
+    | "unknown";
+  /** intent=recommendation일 때 추천 종류. */
+  recIntent?: "urgent" | "priority-nc" | "due-actions" | "delayed" | "my-review";
+  /** intent=judgment일 때 판정 종류. */
+  judgmentTopic?: "nonconformity" | "capa";
+  /** intent=navigate일 때 문서 번호(QE/CP/NC/CR-YYYY-NNN)나 페이지명. */
+  docNumber?: string;
+  pageLabel?: string;
+};
+
+/**
+ * 사용자 자유 입력의 의도를 분류합니다(실제 Gemini 호출).
+ * 최근 대화(historyText)를 참고해 문맥 의존 후속 질문도 해석합니다.
+ * 실패 시 예외를 던지며, 호출부에서 규칙 기반으로 폴백합니다.
+ */
+export async function geminiClassifyChatIntent(
+  userText: string,
+  historyText: string,
+  signal?: AbortSignal
+): Promise<ChatIntentResult> {
+  const prompt = [
+    "당신은 품질경영시스템(IQMS) 품질 도우미의 '의도 분류기'입니다.",
+    "사용자의 마지막 메시지를, 최근 대화 맥락을 참고해 아래 intent 중 하나로 분류하세요.",
+    "반드시 JSON만 출력합니다.",
+    "",
+    "[intent 종류]",
+    "- analytics: 내 데이터에 대한 질문/집계/통계/차트/기간·담당자·상태별 현황 등. (예: '1월부터 완료한 조치 그래프', '1~3월은 없어?', '담당자별 지연 건수', '이번달 완료 몇 건', '내 조치 상태 차트') → 실제 데이터를 분석해 답변/차트로 답합니다. 데이터 관련 질문은 대부분 여기입니다.",
+    "- recommendation: 우선 처리할 문서를 '추천/정렬'해 바로가기 카드로 보여달라. recIntent 지정.",
+    "    recIntent: urgent(급한 업무 종합) / priority-nc(우선순위 높은 부적합) / due-actions(기한 임박 조치) / delayed(지연 조치) / my-review(내 검토·승인 대상).",
+    "    예: '급한 업무 순위'→urgent, '지연된 조치'→delayed, '내 검토 대상'→my-review.",
+    "- navigate: 특정 화면/문서로 이동. 문서번호가 있으면 docNumber(예: CP-2026-003), 없으면 pageLabel(예: '부적합 목록').",
+    "- image: 그림/이미지/일러스트 생성 요청.",
+    "- judgment: 특정 품질 이벤트의 부적합/CAPA 판정 요청. judgmentTopic: nonconformity 또는 capa.",
+    "- my_work: 내 할 일/일정/지연/마감 등 내 업무를 텍스트로 묻는 경우(추천 카드가 아니라 설명).",
+    "- state_change: 문서 상태 변경·완료 처리·등록·삭제 등 '실행' 명령. (단순 조회/보여줘/알려줘는 절대 여기 아님)",
+    "- chat: 그 외 일반 질문/대화.",
+    "",
+    "[중요]",
+    "- '보여줘/보여달라/조회/알려줘/정리해'는 조회이지 state_change가 아닙니다.",
+    "- 직전에 '어떤 통계를 보여드릴까요?'라고 물었고 사용자가 '내 조치 상태'처럼 답하면 intent=chart로 분류하세요.",
+    "- 애매하면 chat.",
+    "",
+    "[최근 대화]",
+    historyText || "(없음)",
+    "",
+    "[사용자 마지막 메시지]",
+    userText,
+  ].join("\n");
+
+  const schema = {
+    type: "OBJECT",
+    properties: {
+      intent: {
+        type: "STRING",
+        enum: [
+          "analytics",
+          "chart",
+          "recommendation",
+          "navigate",
+          "image",
+          "judgment",
+          "my_work",
+          "state_change",
+          "chat",
+        ],
+      },
+      chartTopic: {
+        type: "STRING",
+        enum: [
+          "myAction",
+          "monthly",
+          "capaStage",
+          "ncVerdict",
+          "eventStatus",
+          "unknown",
+        ],
+      },
+      recIntent: {
+        type: "STRING",
+        enum: ["urgent", "priority-nc", "due-actions", "delayed", "my-review"],
+      },
+      judgmentTopic: { type: "STRING", enum: ["nonconformity", "capa"] },
+      docNumber: { type: "STRING" },
+      pageLabel: { type: "STRING" },
+    },
+    required: ["intent"],
+  };
+
+  const out = await generateJson<ChatIntentResult>(prompt, schema, signal);
+  return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* 데이터 인지형 분석 (질문 + 실제 데이터 → 답변 + 필요 시 차트)         */
+/* ------------------------------------------------------------------ */
+
+export type AnalyticsChart = {
+  title: string;
+  kind: "bar" | "donut";
+  data: { label: string; value: number }[];
+};
+
+export type AnalyticsResult = {
+  answer: string;
+  /** 표현에 도움이 될 때만 포함. */
+  chart?: AnalyticsChart;
+};
+
+/**
+ * 사용자의 실제 데이터(dataContext)만 근거로 질문에 답합니다(실제 Gemini 호출).
+ * 필요하면 차트 스펙도 함께 반환합니다. 데이터에 없는 내용은 지어내지 않습니다.
+ * 실패 시 예외를 던지며, 호출부에서 규칙 기반으로 폴백합니다.
+ */
+export async function geminiAnalyzeData(
+  question: string,
+  dataContext: string,
+  historyText: string,
+  signal?: AbortSignal
+): Promise<AnalyticsResult> {
+  const prompt = [
+    "당신은 품질경영시스템(IQMS)의 데이터 분석 도우미입니다.",
+    "아래 [데이터]만 근거로 사용자의 질문에 한국어로 정확하게 답하세요.",
+    "원칙:",
+    "- 반드시 제공된 데이터의 실제 값만 사용하세요. 데이터에 없으면 '해당 데이터가 없습니다'라고 답하세요. 숫자를 지어내지 마세요.",
+    "- 기간·담당자·상태 등 어떤 기준의 질문이든, 데이터를 직접 세어(집계해) 답하세요.",
+    "- 표현에 도움이 되면 chart를 포함하세요(kind: bar 또는 donut, data: {label, value}). 목록/설명만으로 충분하면 chart는 생략.",
+    "- 특정 기간(예: 1~3월)에 데이터가 없으면, 값 0으로 정확히 답하고 '없다'고 명확히 말하세요.",
+    "- answer는 핵심 결론을 먼저, 간결하게. 최근 대화 맥락을 참고해 이어지는 질문도 이해하세요.",
+    "",
+    "[최근 대화]",
+    historyText || "(없음)",
+    "",
+    "[데이터]",
+    dataContext,
+    "",
+    "[질문]",
+    question,
+  ].join("\n");
+
+  const schema = {
+    type: "OBJECT",
+    properties: {
+      answer: { type: "STRING" },
+      chart: {
+        type: "OBJECT",
+        properties: {
+          title: { type: "STRING" },
+          kind: { type: "STRING", enum: ["bar", "donut"] },
+          data: {
+            type: "ARRAY",
+            items: {
+              type: "OBJECT",
+              properties: {
+                label: { type: "STRING" },
+                value: { type: "NUMBER" },
+              },
+              required: ["label", "value"],
+            },
+          },
+        },
+        required: ["title", "kind", "data"],
+      },
+    },
+    required: ["answer"],
+  };
+
+  const out = await generateJson<AnalyticsResult>(prompt, schema, signal);
+  if (typeof out.answer !== "string") {
+    throw new Error("분석 응답 형식이 올바르지 않습니다.");
+  }
+  return out;
+}
+
 /**
  * 품질 도우미 자유 대화 — 실제 Gemini 응답.
  * history는 지금까지의 대화(사용자/도우미 턴). attachments는 마지막 사용자 메시지의
@@ -1081,6 +1277,207 @@ export async function geminiSummarizeActionCompletion(
     return src
       ? `${src.split("\n")[0].slice(0, 80)} 등 계획된 조치를 수행하여 완료했습니다.`
       : "";
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 조치 적절성 판단 (수행한 조치가 해당 부적합에 맞는 조치였는지)          */
+/* ------------------------------------------------------------------ */
+
+export type ActionAdequacyOpinion = {
+  /** adequate=적절 / partial=부분 충족 / inadequate=부적절·불충분. */
+  verdict: "adequate" | "partial" | "inadequate";
+  confidence: number; // 0~100
+  summary: string;
+  checks: ChangeReviewFinding[];
+  generatedAt: string;
+  source: "ai" | "rule";
+};
+
+export function actionVerdictLabel(v: ActionAdequacyOpinion["verdict"]): string {
+  return v === "adequate"
+    ? "적절"
+    : v === "partial"
+      ? "부분 충족"
+      : "부적절";
+}
+
+const ACTION_CORRECTIVE_HINT =
+  /정정|수정|교체|보완|재작업|재발급|재공지|재발\s?방지|예방|원인|절차|점검|교육|개정|시정|복구|반영/;
+
+/**
+ * 수행한 조치 내용이 해당 품질 이벤트(부적합)에 적절한지 규칙 기반으로 점검합니다.
+ * 실제 조치의 타당성을 최종 판단하지 않으며, 담당자의 판단을 보조합니다.
+ */
+export function buildActionAdequacyOpinion(
+  event: QualityEvent,
+  actionContent: string
+): ActionAdequacyOpinion {
+  const text = actionContent.trim();
+  const compact = text.replace(/\s/g, "");
+  const checks: ChangeReviewFinding[] = [];
+
+  if (!text) {
+    return {
+      verdict: "inadequate",
+      confidence: 40,
+      summary: "조치 내용이 비어 있어 적절성을 판단할 수 없습니다.",
+      checks: [
+        { label: "조치 내용", status: "warn", message: "내용이 입력되지 않음" },
+      ],
+      generatedAt: new Date().toISOString().slice(0, 16).replace("T", " "),
+      source: "rule",
+    };
+  }
+
+  // 구체성
+  const specific = compact.length >= 15;
+  checks.push({
+    label: "조치 구체성",
+    status: specific ? "ok" : "warn",
+    message: specific
+      ? "수행 내용이 구체적으로 기술됨"
+      : "내용이 짧아 무엇을 했는지 구체성이 부족",
+  });
+
+  // 원인 대응 여부
+  const corrective = ACTION_CORRECTIVE_HINT.test(text);
+  checks.push({
+    label: "원인 대응",
+    status: corrective ? "ok" : "warn",
+    message: corrective
+      ? "정정·원인·재발 방지 등 시정 성격의 조치가 확인됨"
+      : "부적합의 원인에 대응했는지 내용에서 확인하기 어려움",
+  });
+
+  // 심각도 대비 재발 방지
+  if (event.severity === "HIGH") {
+    const prevention = /재발|예방|근본|절차|개정|교육/.test(text);
+    checks.push({
+      label: "재발 방지",
+      status: prevention ? "ok" : "warn",
+      message: prevention
+        ? "심각도 높음에 맞는 재발 방지 요소가 언급됨"
+        : "심각도 높음인데 재발 방지 조치 언급이 없어 보임",
+    });
+  }
+
+  const warnCount = checks.filter((c) => c.status === "warn").length;
+  let verdict: ActionAdequacyOpinion["verdict"];
+  if (!specific || (warnCount >= 2 && !corrective)) verdict = "inadequate";
+  else if (warnCount > 0) verdict = "partial";
+  else verdict = "adequate";
+
+  const confidence =
+    verdict === "adequate" ? 85 : verdict === "partial" ? 65 : 48;
+
+  const summary =
+    verdict === "adequate"
+      ? "수행한 조치가 해당 부적합에 대체로 적절해 보입니다."
+      : verdict === "partial"
+        ? "조치 방향은 맞지만 일부 보완이 필요해 보입니다."
+        : "해당 부적합을 해소하기에는 조치가 불충분해 보입니다. 내용을 보완해 주세요.";
+
+  return {
+    verdict,
+    confidence,
+    summary,
+    checks,
+    generatedAt: new Date().toISOString().slice(0, 16).replace("T", " "),
+    source: "rule",
+  };
+}
+
+/** 조치 적절성 소견을 복사용 평문으로 직렬화합니다. */
+export function actionAdequacyOpinionToText(o: ActionAdequacyOpinion): string {
+  return [
+    "[AI 조치 적절성 소견]",
+    `판정: ${actionVerdictLabel(o.verdict)} (신뢰도 ${o.confidence}%)`,
+    `요약: ${o.summary}`,
+    ...(o.checks.length
+      ? ["", "[점검]", ...o.checks.map((c) => `- ${c.label}: ${c.message}`)]
+      : []),
+    "",
+    `생성: ${o.generatedAt} · ${o.source === "ai" ? "AI 분석" : "규칙 기반"}`,
+  ].join("\n");
+}
+
+/**
+ * 조치 적절성 판단 — 실제 Gemini 호출.
+ * 수행한 조치가 해당 품질 이벤트(부적합)에 맞는 조치였는지 점검합니다.
+ * 조치를 창작하지 않고, 입력된 조치 내용만 근거로 판단합니다.
+ * 실패 시 규칙 기반 buildActionAdequacyOpinion으로 폴백합니다.
+ */
+export async function geminiAssessActionAdequacy(
+  event: QualityEvent,
+  actionContent: string,
+  signal?: AbortSignal
+): Promise<ActionAdequacyOpinion> {
+  try {
+    const prompt = [
+      "당신은 품질경영시스템(IQMS)에서 경미 부적합의 '단순조치'가 적절했는지 점검하는 AI입니다.",
+      "아래 품질 이벤트(부적합)와 담당자가 수행한 '조치 내용'을 읽고, 그 조치가 해당 부적합을 해소하기에 적절한지 소견을 작성하세요.",
+      "원칙:",
+      "- 조치 내용을 새로 창작·제안하지 마세요. 입력된 내용만 근거로 판단합니다.",
+      "- verdict: adequate(적절)/partial(부분 충족·보완 필요)/inadequate(부적절·불충분) 중 하나.",
+      "- 조치 내용이 비었거나 근거가 부족하면 inadequate.",
+      "- checks에는 조치 구체성, 부적합 원인 대응 여부, (심각도 높으면) 재발 방지 등을 점검해 담으세요.",
+      "- confidence는 0~100 사이 정수(신뢰도 %)로 출력하세요.",
+      "- finding.status는 ok(확인)/warn(주의·부족)/risk(중대 결함)/na(해당없음).",
+      "- 한국어로 간결하게. 결정이 아니라 참고 소견입니다.",
+      "",
+      "[품질 이벤트]",
+      `- 제목: ${event.title}`,
+      `- 심각도: ${event.severity}`,
+      `- 내용: ${event.description || "없음"}`,
+      "",
+      "[수행한 조치 내용]",
+      actionContent.trim() || "없음",
+    ].join("\n");
+
+    const FINDING_SCHEMA = {
+      type: "OBJECT",
+      properties: {
+        label: { type: "STRING" },
+        status: { type: "STRING", enum: ["ok", "warn", "risk", "na"] },
+        message: { type: "STRING" },
+      },
+      required: ["label", "status", "message"],
+    };
+    const schema = {
+      type: "OBJECT",
+      properties: {
+        verdict: { type: "STRING", enum: ["adequate", "partial", "inadequate"] },
+        confidence: { type: "NUMBER" },
+        summary: { type: "STRING" },
+        checks: { type: "ARRAY", items: FINDING_SCHEMA },
+      },
+      required: ["verdict", "confidence", "summary", "checks"],
+    };
+
+    const out = await generateJson<{
+      verdict: ActionAdequacyOpinion["verdict"];
+      confidence: number;
+      summary: string;
+      checks: unknown;
+    }>(prompt, schema, signal);
+
+    const ok = ["adequate", "partial", "inadequate"].includes(out.verdict);
+    if (!ok || typeof out.summary !== "string") {
+      throw new Error("Gemini 응답 형식이 올바르지 않습니다.");
+    }
+
+    return {
+      verdict: out.verdict,
+      confidence: normalizeConfidence(out.confidence),
+      summary: out.summary,
+      checks: sanitizeFindings(out.checks),
+      generatedAt: new Date().toISOString().slice(0, 16).replace("T", " "),
+      source: "ai",
+    };
+  } catch (err) {
+    console.warn("[gemini] 조치 적절성 소견 폴백(규칙 기반 사용):", err);
+    return buildActionAdequacyOpinion(event, actionContent);
   }
 }
 

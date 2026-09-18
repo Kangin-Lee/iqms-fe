@@ -821,7 +821,18 @@ export function isMyChangeReviewPending(cr: ChangeRequest): boolean {
   return asReviewer || asApprover;
 }
 
-function getMyChangeReviews(): ChangeRequest[] {
+/** 변경요청 번호(CR-YYYY-NNN)로 레코드를 찾습니다(챗봇 화면 이동 등). */
+export function findChangeRequestByNumber(
+  crNumber: string
+): ChangeRequest | undefined {
+  seedMockChangeRequests();
+  for (const cr of changeRequestStore.values()) {
+    if (cr.crNumber === crNumber) return cr;
+  }
+  return undefined;
+}
+
+export function getMyChangeReviews(): ChangeRequest[] {
   seedMockChangeRequests();
   return [...changeRequestStore.values()]
     .filter(isMyChangeReviewPending)

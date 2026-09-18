@@ -741,6 +741,7 @@ function QualityEventDetailContent({ event }: { event: QualityEvent }) {
         open={actionCompleteOpen}
         onOpenChange={setActionCompleteOpen}
         onConfirm={handleActionComplete}
+        event={event}
       />
 
       {simpleAction && (

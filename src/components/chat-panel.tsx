@@ -7,6 +7,7 @@ import {
 } from "react";
 import {
   Bot,
+  Download,
   FileIcon,
   FileImageIcon,
   FileTextIcon,
@@ -18,10 +19,14 @@ import {
 } from "lucide-react";
 
 import {
+  geminiAnalyzeData,
   geminiAssessCapaNeed,
   geminiAssessQualityEvent,
   geminiChat,
+  geminiClassifyChatIntent,
   geminiGenerateImage,
+  type AnalyticsChart,
+  type ChatIntentResult,
   type ChatTurn,
 } from "@/lib/gemini";
 import { useNavigate } from "react-router";
@@ -38,17 +43,31 @@ import {
   type QualityEvent,
 } from "@/pages/quailty-event/queries";
 import {
+  findCapaIdByNumber,
   getCapaProgress,
   getMyActionTargets,
   type ActionRow,
 } from "@/pages/capa-management/queries";
+import { capaDetailPath } from "@/pages/capa-management/paths";
 import {
   getNonconformitiesSync,
   MINOR_CLOSURE_PATH,
+  NONCONFORMITY_LIST_PATH,
 } from "@/pages/nonconformity-management/queries";
+import { findChangeRequestByNumber } from "@/pages/change-request-management/queries";
 import ChatDataChart, {
   type ChatChartSpec,
 } from "@/components/chat-data-chart";
+import ChatRecommendations from "@/components/chat-recommendations";
+import {
+  downloadChartPng,
+  downloadDataUrl,
+} from "@/lib/chart-export";
+import {
+  detectRecommendationIntent,
+  getRecommendation,
+  type RecResult,
+} from "@/lib/recommendations";
 import { QUALITY_EVENT_FROM_PARAM } from "@/pages/quailty-event/paths";
 
 import {
@@ -97,6 +116,8 @@ type ChatMessage = {
   imageUrl?: string;
   /** 실제 데이터 차트. 있으면 말풍선 아래에 렌더합니다. */
   chart?: ChatChartSpec;
+  /** 추천 문서 카드. 있으면 말풍선 아래에 렌더합니다. */
+  recommendations?: RecResult;
   /** 사용자가 바로 고를 수 있는 보기. 해당 메시지가 마지막일 때만 노출됩니다. */
   suggestions?: string[];
 };
@@ -131,7 +152,9 @@ const MOCK_REPLY_DELAY = 500;
 type FlowState =
   | { kind: "menu" }
   | { kind: "event-number"; topic: string }
-  | { kind: "freeform" };
+  | { kind: "freeform" }
+  /** "어떤 통계를 보여드릴까요?" 이후 차트 주제 선택을 기다리는 상태. */
+  | { kind: "await-chart" };
 
 const GREETING_TEXT =
   "안녕하세요. IQMS 품질 도우미입니다. 무엇을 도와드릴까요?\n번호를 입력해 보기를 선택하거나, 궁금한 점을 자유롭게 물어보세요.";
@@ -243,7 +266,12 @@ function detectJudgmentTopic(text: string): string | null {
  * 정보 질문("~가 뭐야", "어떻게", "알려줘" 등)은 명령으로 보지 않습니다.
  */
 function isStateChangeCommand(text: string): boolean {
-  if (/(뭐|무엇|어떻게|왜\b|언제|알려|설명|차이|의미|\?)/.test(text)) {
+  // 질문/조회 요청은 명령이 아닙니다. (예: "조치 완료한 건만 보여줘")
+  if (
+    /(뭐|무엇|어떻게|왜\b|언제|알려|설명|차이|의미|\?|보여|보고\s*싶|조회|표시|그래프|차트|목록|리스트|보고서)/.test(
+      text
+    )
+  ) {
     return false;
   }
   return /(조치\s*완료|완료\s*처리|등록해|생성해|만들어\s*줘|삭제해|무효\s*처리|종결\s*처리|상태\s*(를)?\s*변경)/.test(
@@ -263,7 +291,16 @@ function detectNavigation(
       text
     );
   if (!wantsNav) return null;
+  return resolveNavTarget(text);
+}
 
+/**
+ * 텍스트에서 이동 대상(문서 번호/페이지명)을 해석합니다(이동 동사 불필요).
+ * AI가 navigate로 분류한 경우, 이 함수로 실제 경로를 찾습니다.
+ */
+function resolveNavTarget(
+  text: string
+): { path: string; label: string } | null {
   // 이벤트 번호가 있으면 해당 이벤트 상세로 이동합니다.
   const event = findEventInText(text);
   if (event) {
@@ -271,6 +308,52 @@ function detectNavigation(
       path: `/quality-events/detail/${event.id}`,
       label: `${event.eventNumber} 상세`,
     };
+  }
+
+  // CAPA/조치 번호(CP-YYYY-NNN)가 있으면 해당 CAPA 상세로 이동합니다.
+  const capaMatch = text.toLowerCase().match(/cp[-\s]?\d{4}[-\s]?\d{1,4}/);
+  if (capaMatch) {
+    const digits = capaMatch[0].replace(/\D/g, "");
+    const capaNumber = `CP-${digits.slice(0, 4)}-${digits.slice(4).padStart(3, "0")}`;
+    const ncId = findCapaIdByNumber(capaNumber);
+    if (ncId) {
+      return {
+        path: capaDetailPath(ncId, "/capa/status"),
+        label: `${capaNumber} 상세`,
+      };
+    }
+    // 번호를 못 찾으면 진행 현황 목록으로 안내합니다.
+    return { path: "/capa/status", label: "CAPA 진행 현황" };
+  }
+
+  // 부적합 번호(NC-YYYY-NNN)가 있으면 해당 부적합(품질 이벤트) 상세로 이동합니다.
+  const ncMatch = text.toLowerCase().match(/nc[-\s]?\d{4}[-\s]?\d{1,4}/);
+  if (ncMatch) {
+    const digits = ncMatch[0].replace(/\D/g, "");
+    const ncNumber = `NC-${digits.slice(0, 4)}-${digits.slice(4).padStart(3, "0")}`;
+    const nc = getNonconformitiesSync().find((n) => n.ncNumber === ncNumber);
+    if (nc) {
+      return {
+        path: `/quality-events/detail/${nc.event.id}?${QUALITY_EVENT_FROM_PARAM}=${encodeURIComponent(NONCONFORMITY_LIST_PATH)}`,
+        label: `${ncNumber} 상세`,
+      };
+    }
+    return { path: NONCONFORMITY_LIST_PATH, label: "부적합 목록" };
+  }
+
+  // 형상변경요청 번호(CR-YYYY-NNN)가 있으면 해당 상세로 이동합니다.
+  const crMatch = text.toLowerCase().match(/cr[-\s]?\d{4}[-\s]?\d{1,4}/);
+  if (crMatch) {
+    const digits = crMatch[0].replace(/\D/g, "");
+    const crNumber = `CR-${digits.slice(0, 4)}-${digits.slice(4).padStart(3, "0")}`;
+    const cr = findChangeRequestByNumber(crNumber);
+    if (cr) {
+      return {
+        path: `/configuration-changes/detail/${cr.id}?from=${encodeURIComponent("/configuration-changes/list")}`,
+        label: `${crNumber} 상세`,
+      };
+    }
+    return { path: "/configuration-changes/list", label: "형상변경요청 목록" };
   }
 
   // 페이지명 → 경로 매핑(구체적인 항목을 먼저 검사).
@@ -633,16 +716,69 @@ type ChartTopic =
   | "eventStatus"
   | "list";
 
-/** 차트/통계 요청과 주제를 추정합니다. 차트 의도가 없으면 null. */
-function detectChartTopic(text: string): ChartTopic | null {
-  const chartWord = /(차트|그래프|통계|시각화|파이|도넛|막대|비율|분포)/.test(text);
-  if (!chartWord) return null;
-  if (/(내|제|나)\s*(조치)|조치\s*(상태|현황|분포)/.test(text)) return "myAction";
-  if (/(월별|달별|월간).*(완료)|완료.*(월별|추이)/.test(text)) return "monthly";
+/**
+ * 텍스트에서 차트 주제 키워드만 추정합니다(차트/그래프 단어 없이도).
+ * 차트 선택 대기(await-chart) 상태의 후속 답("내 조치 상태" 등) 해석에 씁니다.
+ */
+function chartTopicKeyword(text: string): Exclude<ChartTopic, "list"> | null {
+  // 월 범위 표현("N월부터"·"N월까지")이 있으면 월별 완료 추이로 봅니다.
+  if (/\d{1,2}\s*월\s*(부터|까지)/.test(text)) return "monthly";
+  // 완료 추이(월별): "완료" + 기간/데이터/건/조치 표현 → 월별 완료 차트
+  if (
+    /완료/.test(text) &&
+    /(조치|업무|월별|달별|월간|부터|까지|추이|기간|현재까지|데이터|건)/.test(text)
+  )
+    return "monthly";
+  if (/(월별|달별|월간)/.test(text)) return "monthly";
+  // 내 조치 상태 분포(진행중/지연/완료)
+  if (/(내|제|나)\s*조치|조치\s*(상태|현황|분포)/.test(text)) return "myAction";
   if (/capa/i.test(text) && /(단계|상태|진행|분포)/.test(text)) return "capaStage";
   if (/부적합/.test(text)) return "ncVerdict";
   if (/(품질\s*)?이벤트/.test(text)) return "eventStatus";
-  return "list";
+  return null;
+}
+
+/** 차트/통계 요청과 주제를 추정합니다. 차트 의도가 없으면 null. */
+function detectChartTopic(text: string): ChartTopic | null {
+  const chartWord = /(차트|그래프|통계|시각화|파이|도넛|막대|비율|분포)/.test(text);
+  if (chartWord) return chartTopicKeyword(text) ?? "list";
+  // "…보여줘/보여달라/그려" 같은 조회 요청 + 명확한 차트 주제면 차트로 봅니다.
+  const viewVerb = /(보여|보고\s*싶|그려|그래프로|차트로)/.test(text);
+  const topic = chartTopicKeyword(text);
+  if (viewVerb && topic) return topic;
+  return null;
+}
+
+/**
+ * 자연어에서 월 범위를 추출합니다(올해 기준).
+ * "1월부터" → {from:1}, "1월부터 3월까지" → {from:1,to:3}, "3월까지" → {from:1,to:3}.
+ * 없으면 null(→ 기본 최근 6개월).
+ */
+function detectMonthRange(text: string): { from: number; to?: number } | null {
+  const fromM = text.match(/(\d{1,2})\s*월\s*부터/);
+  const toM = text.match(/(\d{1,2})\s*월\s*까지/);
+  let from = fromM ? Number(fromM[1]) : null;
+  let to = toM ? Number(toM[1]) : undefined;
+  if (from === null && /올해|금년|연초|연간/.test(text)) from = 1;
+  if (from === null && to === undefined) return null;
+  if (from === null) from = 1; // "3월까지"만 있으면 1월부터로 간주
+  if (from < 1 || from > 12) return null;
+  if (to !== undefined && (to < 1 || to > 12)) to = undefined;
+  return { from, to };
+}
+
+/** 올해 from~to월(또는 from~현재)의 라벨/키 목록. */
+function monthsInRange(from: number, to?: number): { key: string; label: string }[] {
+  const now = new Date();
+  const year = now.getFullYear();
+  const cur = now.getMonth() + 1;
+  const end = Math.min(to ?? cur, 12);
+  const start = Math.min(Math.max(from, 1), end);
+  const out: { key: string; label: string }[] = [];
+  for (let m = start; m <= end; m += 1) {
+    out.push({ key: `${year}-${String(m).padStart(2, "0")}`, label: `${m}월` });
+  }
+  return out;
 }
 
 /** 최근 6개월 라벨/키 목록(오래된→최신). */
@@ -662,7 +798,8 @@ function last6Months(): { key: string; label: string }[] {
 
 /** 주제별 실제 데이터를 집계해 차트 스펙 + 요약 문장을 만듭니다. */
 async function buildChartSpec(
-  topic: Exclude<ChartTopic, "list">
+  topic: Exclude<ChartTopic, "list">,
+  monthRange?: { from: number; to?: number }
 ): Promise<{ spec: ChatChartSpec; summary: string }> {
   if (topic === "myAction") {
     const actions = await getMyActionTargets();
@@ -694,15 +831,31 @@ async function buildChartSpec(
         const m = (a.completedDateLabel ?? "").slice(0, 7);
         byMonth.set(m, (byMonth.get(m) ?? 0) + 1);
       });
-    const data = last6Months().map((m) => ({
+    // 요청한 월 범위가 있으면 그 범위를, 없으면 최근 6개월을 보여줍니다.
+    const months = monthRange
+      ? monthsInRange(monthRange.from, monthRange.to)
+      : last6Months();
+    const data = months.map((m) => ({
       label: m.label,
       value: byMonth.get(m.key) ?? 0,
       color: "#22c55e",
     }));
     const total = data.reduce((s, d) => s + d.value, 0);
+    const rangeLabel = monthRange
+      ? monthRange.to
+        ? `${monthRange.from}월부터 ${monthRange.to}월까지`
+        : `${monthRange.from}월부터 현재까지`
+      : "최근 6개월간";
+    const title = monthRange
+      ? monthRange.to
+        ? `${monthRange.from}월~${monthRange.to}월 내 조치 완료`
+        : `${monthRange.from}월~현재 내 조치 완료`
+      : "월별 내 조치 완료";
+    const zero =
+      total === 0 ? " 해당 기간에는 완료된 조치가 없습니다." : "";
     return {
-      spec: { title: "월별 내 조치 완료", kind: "bar", data },
-      summary: `최근 6개월간 완료한 조치는 총 ${total}건입니다.`,
+      spec: { title, kind: "bar", data },
+      summary: `${rangeLabel} 완료한 조치는 총 ${total}건입니다.${zero}`,
     };
   }
 
@@ -759,6 +912,75 @@ async function buildChartSpec(
     },
     summary: `전체 품질 이벤트 ${qualityEventData.length}건의 상태 분포입니다.`,
   };
+}
+
+/** 생성형 차트 색 팔레트(AI가 준 data에 순서대로 배정). */
+const CHART_PALETTE = [
+  "#3b82f6",
+  "#22c55e",
+  "#ef4444",
+  "#f59e0b",
+  "#8b5cf6",
+  "#06b6d4",
+  "#ec4899",
+  "#a1a1aa",
+];
+
+/** AI 분석 차트(label/value) → 렌더용 ChatChartSpec(색 배정). */
+function toChartSpec(chart: AnalyticsChart): ChatChartSpec {
+  return {
+    title: chart.title,
+    kind: chart.kind,
+    data: chart.data.map((d, i) => ({
+      label: String(d.label),
+      value: Number(d.value) || 0,
+      color: CHART_PALETTE[i % CHART_PALETTE.length],
+    })),
+  };
+}
+
+/**
+ * AI 데이터 분석에 넘길 사용자 실제 데이터 스냅샷(구조화 텍스트).
+ * AI가 이 데이터만 근거로 임의 질문(기간·담당자·상태별 등)에 답합니다.
+ */
+async function buildAnalyticsContext(): Promise<string> {
+  const today = new Date().toISOString().slice(0, 10);
+  const reviews = qualityEventData.filter(isMyReviewPending);
+  const actions = await getMyActionTargets();
+  const ncs = getNonconformitiesSync();
+  const events = qualityEventData;
+
+  const lines: string[] = [];
+  lines.push(`# 기준일: 오늘=${today} / 사용자=${currentUser.name}`);
+  lines.push("");
+  lines.push(
+    `# 내 조치 (${actions.length}건) — 각 줄: CAPA번호 | 제목 | 상태(in_progress/completed) | 기한 | 완료일 | 담당자 | 지연여부`
+  );
+  actions.forEach((a) =>
+    lines.push(
+      `- ${a.capaNumber} | ${a.title} | ${a.status} | 기한 ${a.dueDateLabel} | 완료 ${a.completedDateLabel ?? "-"} | ${a.assignee} | ${a.delayed ? "지연" : "정상"}`
+    )
+  );
+  lines.push("");
+  lines.push(`# 내 검토 대기 품질이벤트 (${reviews.length}건)`);
+  reviews.forEach((e) =>
+    lines.push(`- ${e.eventNumber} | ${e.title} | ${e.statusName}`)
+  );
+  lines.push("");
+  lines.push(
+    `# 부적합 (${ncs.length}건) — 부적합번호 | 제목 | 심각도 | 상태 | CAPA판정`
+  );
+  ncs.forEach((n) =>
+    lines.push(
+      `- ${n.ncNumber} | ${n.event.title} | ${n.event.severity} | ${n.statusName} | ${n.capaVerdict ?? "미판정"}`
+    )
+  );
+  lines.push("");
+  const st = (s: number) => events.filter((e) => e.status === s).length;
+  lines.push(
+    `# 품질 이벤트 상태 카운트: 작성중 ${st(1)} / 검토중 ${st(2)} / 종료 ${st(3)} / 반려 ${st(4)} (총 ${events.length}건)`
+  );
+  return lines.join("\n");
 }
 
 type ChatPanelProps = {
@@ -869,6 +1091,54 @@ function TypingDots() {
         </span>
       ))}
     </span>
+  );
+}
+
+/** 차트/이미지 카드 우상단에 얹는 다운로드 아이콘 버튼(공통 스타일). */
+function DownloadOverlayButton({
+  onDownload,
+  label,
+  busy,
+}: {
+  onDownload: () => void;
+  label: string;
+  busy?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      onClick={onDownload}
+      disabled={busy}
+      className="absolute right-2 top-2 inline-flex size-7 items-center justify-center rounded-md border bg-background/80 text-muted-foreground shadow-sm backdrop-blur transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
+    >
+      <Download className={cn("size-4", busy && "animate-pulse")} />
+    </button>
+  );
+}
+
+/** 차트를 PNG로 저장하는 우상단 오버레이 버튼(변환 중 표시·실패 방어). */
+function ChartDownloadButton({ spec }: { spec: ChatChartSpec }) {
+  const [busy, setBusy] = useState(false);
+
+  const handleDownload = async () => {
+    setBusy(true);
+    try {
+      await downloadChartPng(spec);
+    } catch (err) {
+      console.error("[chart-export] 차트 다운로드 실패:", err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <DownloadOverlayButton
+      onDownload={handleDownload}
+      label="차트 PNG 다운로드"
+      busy={busy}
+    />
   );
 }
 
@@ -1307,8 +1577,8 @@ export function ChatPanel({ open, onOpenChange }: ChatPanelProps) {
     }
   }
 
-  /** 실제 데이터 차트로 통계를 렌더합니다. */
-  async function replyWithChart(topic: ChartTopic) {
+  /** 실제 데이터 차트로 통계를 렌더합니다. sourceText로 월 범위를 해석합니다. */
+  async function replyWithChart(topic: ChartTopic, sourceText?: string) {
     if (topic === "list") {
       replyWith(
         "어떤 통계를 보여드릴까요? 예를 들어 이렇게 말씀해 주세요.\n" +
@@ -1317,13 +1587,130 @@ export function ChatPanel({ open, onOpenChange }: ChatPanelProps) {
           "• **CAPA 단계 분포**\n" +
           "• **부적합 판정 분포**\n" +
           "• **품질 이벤트 상태** 통계",
-        { kind: "menu" },
+        { kind: "await-chart" },
         MENU_SUGGESTIONS
       );
       return;
     }
-    const { spec, summary } = await buildChartSpec(topic);
+    const monthRange =
+      topic === "monthly" && sourceText
+        ? detectMonthRange(sourceText) ?? undefined
+        : undefined;
+    const { spec, summary } = await buildChartSpec(topic, monthRange);
     replyWith(summary, { kind: "menu" }, MENU_SUGGESTIONS, spec);
+  }
+
+  /**
+   * 추천 요청 — 실제 데이터를 규칙 기반으로 랭킹해 추천 문서 카드로 답합니다.
+   * (우선순위 부적합 / 기한 임박 조치 / 지연 조치 / 내 검토·승인 대상 등)
+   */
+  async function replyWithRecommendation(
+    intent: Parameters<typeof getRecommendation>[0]
+  ) {
+    const targetId = activeId;
+    setWaitingMs(0);
+    updateConversation(targetId, (item) => ({ ...item, isResponding: true }));
+
+    const result = await getRecommendation(intent);
+    const timers = replyTimersRef.current;
+    const pending = timers.get(targetId);
+    if (pending !== undefined) window.clearTimeout(pending);
+
+    timers.set(
+      targetId,
+      window.setTimeout(() => {
+        timers.delete(targetId);
+        const assistantMessage: ChatMessage = {
+          id: `assistant-${(messageSeqRef.current += 1)}`,
+          role: "assistant",
+          text: result.intro,
+          recommendations: result.items.length ? result : undefined,
+          suggestions: MENU_SUGGESTIONS,
+        };
+        updateConversation(targetId, (conversation) => ({
+          ...conversation,
+          messages: [...conversation.messages, assistantMessage],
+          flow: { kind: "menu" },
+          isResponding: false,
+        }));
+      }, MOCK_REPLY_DELAY)
+    );
+  }
+
+  /**
+   * 데이터 인지형 분석 — 질문 + 실제 데이터를 AI에 넘겨 답변/차트를 생성합니다.
+   * AI 실패(키 없음/한도/오류) 시 규칙 기반(고정 차트/업무 요약)으로 폴백합니다.
+   */
+  async function replyWithAnalytics(question: string) {
+    const targetId = activeId;
+    // 후속 질문에도 데이터 맥락을 이어가도록 표시.
+    updateConversation(targetId, (item) => ({ ...item, workAware: true }));
+
+    const conversation = conversations.find((item) => item.id === targetId);
+    const historyText = (conversation?.messages ?? [])
+      .slice(-6)
+      .map((m) => `${m.role === "user" ? "사용자" : "도우미"}: ${m.text}`)
+      .join("\n");
+
+    const controller = new AbortController();
+    aiAbortersRef.current.set(targetId, controller);
+    setWaitingMs(0);
+    updateConversation(targetId, (item) => ({ ...item, isResponding: true }));
+
+    const finish = (text: string, chart?: ChatChartSpec) => {
+      const assistantMessage: ChatMessage = {
+        id: `assistant-${(messageSeqRef.current += 1)}`,
+        role: "assistant",
+        text,
+        chart,
+        suggestions: MENU_SUGGESTIONS,
+      };
+      updateConversation(targetId, (item) => ({
+        ...item,
+        messages: [...item.messages, assistantMessage],
+        flow: { kind: "menu" },
+        isResponding: false,
+      }));
+    };
+
+    try {
+      const context = await buildAnalyticsContext();
+      const res = await geminiAnalyzeData(
+        question,
+        context,
+        historyText,
+        controller.signal
+      );
+      if (controller.signal.aborted) {
+        finish("응답을 중단했습니다.");
+        return;
+      }
+      const chart =
+        res.chart && res.chart.data?.length ? toChartSpec(res.chart) : undefined;
+      finish(res.answer.trim() || "답변을 생성하지 못했습니다.", chart);
+    } catch {
+      if (controller.signal.aborted) {
+        finish("응답을 중단했습니다.");
+        return;
+      }
+      // 폴백: 규칙 기반 고정 차트 또는 업무 요약.
+      const topic = detectChartTopic(question);
+      if (topic && topic !== "list") {
+        const { spec, summary } = await buildChartSpec(
+          topic,
+          detectMonthRange(question) ?? undefined
+        );
+        finish(summary, spec);
+      } else {
+        const reviews = qualityEventData.filter(isMyReviewPending);
+        const actions = (await getMyActionTargets()).filter(
+          (a) => a.status === "in_progress"
+        );
+        finish(buildWorkResponse(question, reviews, actions));
+      }
+    } finally {
+      aiAbortersRef.current.delete(targetId);
+    }
   }
 
   /** 내 업무 질문에 의도별 고정 요약으로 답합니다(메뉴 "내 할 일"용, 즉시 응답). */
@@ -1337,69 +1724,6 @@ export function ChatPanel({ open, onOpenChange }: ChatPanelProps) {
       { kind: "menu" },
       MENU_SUGGESTIONS
     );
-  }
-
-  /**
-   * 내 업무 자유 질문 — 실제 업무 데이터를 컨텍스트로 넘겨 AI가 자유롭게 답합니다.
-   * AI 실패(키 없음/한도 등)나 빈 응답 시 로컬 의도별 요약으로 대체합니다.
-   */
-  async function replyWithMyWorkAI(question: string) {
-    const targetId = activeId;
-    // 이후 후속 질문에도 업무 데이터를 이어서 참고하도록 표시합니다.
-    updateConversation(targetId, (item) => ({ ...item, workAware: true }));
-    const reviews = qualityEventData.filter(isMyReviewPending);
-    const actions = (await getMyActionTargets()).filter(
-      (a) => a.status === "in_progress"
-    );
-    const localAnswer = buildWorkResponse(question, reviews, actions);
-    const context = buildWorkContext(reviews, actions);
-    const conversation = conversations.find((item) => item.id === targetId);
-
-    // 대화 맥락(이전 turn) + 업무 데이터 + 이번 질문.
-    const history: ChatTurn[] = [
-      ...(conversation?.messages ?? []).map((item) => ({
-        role: item.role,
-        text: item.text,
-      })),
-      {
-        role: "user",
-        text:
-          `너는 IQMS 품질 도우미야. 아래는 현재 로그인 사용자(${currentUser.name})의 실제 업무 데이터야. ` +
-          "반드시 이 데이터에만 근거해 질문에 답하고, 데이터에 없는 내용은 지어내지 말고 모른다고 해. " +
-          "간결하게 한국어로, 필요하면 목록으로 답해줘.\n\n" +
-          `[내 업무 데이터]\n${context}\n\n[질문]\n${question}`,
-      },
-    ];
-
-    const controller = new AbortController();
-    aiAbortersRef.current.set(targetId, controller);
-    setWaitingMs(0);
-    updateConversation(targetId, (item) => ({ ...item, isResponding: true }));
-
-    const finish = (text: string) => {
-      const assistantMessage: ChatMessage = {
-        id: `assistant-${(messageSeqRef.current += 1)}`,
-        role: "assistant",
-        text,
-        suggestions: MENU_SUGGESTIONS,
-      };
-      updateConversation(targetId, (item) => ({
-        ...item,
-        messages: [...item.messages, assistantMessage],
-        flow: { kind: "menu" },
-        isResponding: false,
-      }));
-    };
-
-    try {
-      const answer = await geminiChat(history, controller.signal);
-      finish(answer.trim() || localAnswer);
-    } catch {
-      // 중단은 안내, 그 외 실패는 로컬 요약으로 대체(키 없음/한도 등에도 답을 보장).
-      finish(controller.signal.aborted ? "응답을 중단했습니다." : localAnswer);
-    } finally {
-      aiAbortersRef.current.delete(targetId);
-    }
   }
 
   function selectMenuOption(option: MenuOption) {
@@ -1421,41 +1745,57 @@ export function ChatPanel({ open, onOpenChange }: ChatPanelProps) {
     replyWith("네, 질문을 자유롭게 입력해 주세요.", { kind: "freeform" });
   }
 
-  function submit(text: string, files: ChatAttachment[]) {
-    // 첨부파일이 있으면 멀티모달 AI가 파일을 읽고 답합니다(구조화 메뉴보다 우선).
-    if (files.length > 0) {
-      pushUserMessage(text, files);
-      replyWithAI(activeId, text, files);
-      return;
+  /** 규칙 기반 의도 분류(AI 분류 실패 시 폴백). 기존 감지 순서를 따릅니다. */
+  function ruleClassify(text: string): ChatIntentResult {
+    const chart = detectChartTopic(text);
+    if (chart) {
+      return {
+        intent: "chart",
+        chartTopic: chart === "list" ? "unknown" : chart,
+      };
     }
+    const rec = detectRecommendationIntent(text);
+    if (rec) return { intent: "recommendation", recIntent: rec };
+    if (isMyWorkQuery(text)) return { intent: "my_work" };
+    if (detectNavigation(text)) return { intent: "navigate" };
+    if (wantsImage(text)) return { intent: "image" };
+    if (isStateChangeCommand(text)) return { intent: "state_change" };
+    const event = findEventInText(text);
+    const topic = detectJudgmentTopic(text);
+    if (event && topic) {
+      return {
+        intent: "judgment",
+        judgmentTopic: topic === "CAPA 판정" ? "capa" : "nonconformity",
+      };
+    }
+    return { intent: "chat" };
+  }
 
-    // 차트/통계 요청이면 실제 데이터로 차트를 렌더합니다(업무 질문보다 우선).
-    if (flow.kind !== "event-number") {
-      const chartTopic = detectChartTopic(text);
-      if (chartTopic) {
-        pushUserMessage(text, files);
-        replyWithChart(chartTopic);
+  /** 분류된 의도를 알맞은 핸들러로 라우팅합니다. */
+  function dispatchIntent(result: ChatIntentResult, text: string) {
+    switch (result.intent) {
+      // 데이터 질문/통계/차트/내 업무 → 실제 데이터로 AI가 답변·차트 생성.
+      case "analytics":
+      case "chart":
+      case "my_work":
+        replyWithAnalytics(text);
         return;
-      }
-    }
-
-    // 내 업무(할 일·지연·마감·검토·조치·브리핑 등) 질문이면
-    // 실제 업무 데이터를 컨텍스트로 넘겨 AI가 자유롭게 답합니다(실패 시 로컬 요약).
-    if (flow.kind !== "event-number" && isMyWorkQuery(text)) {
-      pushUserMessage(text, files);
-      replyWithMyWorkAI(text);
-      return;
-    }
-
-    // 화면 이동 요청이면 해당 페이지로 이동합니다(이벤트번호 입력 단계 제외).
-    if (flow.kind !== "event-number") {
-      const nav = detectNavigation(text);
-      if (nav) {
-        pushUserMessage(text, files);
+      case "recommendation":
+        replyWithRecommendation(result.recIntent ?? "urgent");
+        return;
+      case "image":
+        replyWithImage(activeId, text);
+        return;
+      case "state_change":
+        denyStateChange(findEventInText(text));
+        return;
+      case "navigate": {
+        const nav = resolveNavTarget(text);
+        if (!nav) {
+          replyWithAI(activeId, text);
+          return;
+        }
         navigate(nav.path);
-
-        // 같은 메시지에 판정 의도까지 있으면 이동 후 판정도 수행합니다.
-        // (예: "QE-2026-004로 이동해주고 부적합인지 판정해줘")
         const event = findEventInText(text);
         const topic = detectJudgmentTopic(text);
         if (event && topic) {
@@ -1469,52 +1809,64 @@ export function ChatPanel({ open, onOpenChange }: ChatPanelProps) {
         }
         return;
       }
-    }
-
-    // 이미지/차트 생성 요청은 이미지 모델로 처리합니다(이벤트번호 입력 단계 제외).
-    if (flow.kind !== "event-number" && wantsImage(text)) {
-      pushUserMessage(text, files);
-      replyWithImage(activeId, text);
-      return;
-    }
-
-    // 문서 상태 변경/생성 명령은 실행하지 않고 화면으로 안내합니다.
-    if (flow.kind !== "event-number" && isStateChangeCommand(text)) {
-      pushUserMessage(text, files);
-      denyStateChange(findEventInText(text));
-      return;
-    }
-
-    if (flow.kind === "menu") {
-      const option = findMenuOption(text);
-      if (option) {
-        selectMenuOption(option);
+      case "judgment": {
+        const event = findEventInText(text);
+        const topic = result.judgmentTopic === "capa" ? "CAPA 판정" : "부적합 판정";
+        if (event) {
+          replyWithJudgment(activeId, topic, event);
+        } else {
+          replyWith(
+            `${topic}을 진행하겠습니다.\n대상 품질 이벤트 번호를 입력해 주세요. (예: ${EVENT_NUMBER_EXAMPLE})`,
+            { kind: "event-number", topic }
+          );
+        }
         return;
       }
-
-      // 한 문장에 이벤트 번호 + 판정 의도가 함께 있으면 바로 판정합니다.
-      // (예: "QE-2026-006 부적합 판정 해줘")
-      const event = findEventInText(text);
-      const topic = detectJudgmentTopic(text);
-      if (event && topic) {
-        pushUserMessage(text, files);
-        replyWithJudgment(activeId, topic, event);
+      case "chat":
+      default:
+        replyWithAI(activeId, text);
         return;
-      }
+    }
+  }
 
-      // 그 외에는 자유 질문으로 보고 실제 AI가 답합니다.
+  /**
+   * 자유 입력의 의도를 AI로 분류해 라우팅합니다(실패 시 규칙 기반 폴백).
+   * 사용자 메시지는 호출 전에 이미 추가되어 있어야 합니다.
+   */
+  async function classifyAndRoute(text: string) {
+    const targetId = activeId;
+    const conversation = conversations.find((item) => item.id === targetId);
+    const historyText = (conversation?.messages ?? [])
+      .slice(-6)
+      .map((m) => `${m.role === "user" ? "사용자" : "도우미"}: ${m.text}`)
+      .join("\n");
+
+    setWaitingMs(0);
+    updateConversation(targetId, (item) => ({ ...item, isResponding: true }));
+
+    let result: ChatIntentResult;
+    try {
+      result = await geminiClassifyChatIntent(text, historyText);
+    } catch {
+      // 키 없음/한도/오류 시 규칙 기반으로 분류합니다.
+      result = ruleClassify(text);
+    }
+
+    dispatchIntent(result, text);
+  }
+
+  function submit(text: string, files: ChatAttachment[]) {
+    // 첨부파일이 있으면 멀티모달 AI가 파일을 읽고 답합니다(구조화 메뉴보다 우선).
+    if (files.length > 0) {
       pushUserMessage(text, files);
-      replyWithAI(activeId, text);
+      replyWithAI(activeId, text, files);
       return;
     }
 
+    // 이벤트 번호 입력 대기 — 번호를 추출해 판정합니다(결정적 처리).
     if (flow.kind === "event-number") {
       pushUserMessage(text, files);
-
-      // 번호 뒤에 "부적합 판정 해줘" 같은 말이 붙어도 번호를 추출해 찾습니다.
       const event = findEventInText(text);
-
-      // 데이터에 없는 이벤트 번호는 안내 후 다시 선택하게 합니다.
       if (!event) {
         replyWith(
           `입력하신 내용에서 등록된 품질 이벤트 번호를 찾지 못했습니다.\n이벤트 번호를 다시 확인해 입력하시거나, 아래에서 다시 선택해 주세요. (예: ${EVENT_NUMBER_EXAMPLE})`,
@@ -1523,15 +1875,33 @@ export function ChatPanel({ open, onOpenChange }: ChatPanelProps) {
         );
         return;
       }
-
-      // 존재하는 이벤트는 실제 AI가 부적합/CAPA 여부를 판정합니다.
       replyWithJudgment(activeId, flow.topic, event);
       return;
     }
 
-    // freeform: 자유 질문 → 실제 AI(Gemini) 응답.
+    // 차트 선택 대기 — 이어지는 답("내 조치 상태" 등)을 차트 주제로 해석합니다.
+    if (flow.kind === "await-chart") {
+      const topic = chartTopicKeyword(text);
+      if (topic) {
+        pushUserMessage(text, files);
+        replyWithChart(topic, text);
+        return;
+      }
+      // 주제를 못 알아들으면 아래 AI 분류로 넘어갑니다(맥락 종료).
+    }
+
+    // 메뉴 상태에서 번호(1~4)나 보기 라벨을 고른 경우 — 결정적 처리.
+    if (flow.kind === "menu") {
+      const option = findMenuOption(text);
+      if (option) {
+        selectMenuOption(option);
+        return;
+      }
+    }
+
+    // 그 외 자유 입력 → AI가 의도를 분류해 라우팅합니다(실패 시 규칙 기반).
     pushUserMessage(text, files);
-    replyWithAI(activeId, text);
+    classifyAndRoute(text);
   }
 
   function handleSend() {
@@ -1777,17 +2147,33 @@ export function ChatPanel({ open, onOpenChange }: ChatPanelProps) {
                           )}
 
                           {message.imageUrl && (
-                            <img
-                              src={message.imageUrl}
-                              alt="생성된 이미지"
-                              className="mt-1 max-w-full rounded-lg border"
-                            />
+                            <div className="relative mt-1 inline-block">
+                              <img
+                                src={message.imageUrl}
+                                alt="생성된 이미지"
+                                className="max-w-full rounded-lg border"
+                              />
+                              <DownloadOverlayButton
+                                onDownload={() =>
+                                  downloadDataUrl(message.imageUrl!)
+                                }
+                                label="이미지 다운로드"
+                              />
+                            </div>
                           )}
 
                           {message.chart && (
-                            <div className="mt-1">
+                            <div className="relative mt-1">
                               <ChatDataChart spec={message.chart} />
+                              <ChartDownloadButton spec={message.chart} />
                             </div>
+                          )}
+
+                          {message.recommendations && (
+                            <ChatRecommendations
+                              result={message.recommendations}
+                              onNavigate={(href) => navigate(href)}
+                            />
                           )}
 
                           {showSuggestions && (
