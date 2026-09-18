@@ -6,7 +6,18 @@
  * 빠지는 문제 없이 제목·범례·값이 모두 포함된 완전한 이미지를 얻을 수 있습니다.
  * 생성한 SVG를 캔버스로 래스터화해 PNG(투명 없음, 2배 해상도)로 저장합니다.
  */
-import type { ChatChartSpec } from "@/components/chat-data-chart";
+/** 내보내기용 차트 데이터 한 항목. */
+export type ExportChartDatum = { label: string; value: number; color: string };
+
+/**
+ * 내보내기용 차트 스펙(도넛/막대/라인).
+ * 채팅 차트(ChatChartSpec: donut|bar)와 대시보드 차트가 공통으로 사용합니다.
+ */
+export type ExportChartSpec = {
+  title: string;
+  kind: "donut" | "bar" | "line";
+  data: ExportChartDatum[];
+};
 
 /** 내보내기 이미지는 공유·인쇄를 고려해 항상 라이트 테마 색으로 고정합니다. */
 const COLORS = {
@@ -63,7 +74,7 @@ function donutSegment(
 }
 
 /** 도넛 차트 SVG(도넛 + 범례 + 중앙 합계). */
-function buildDonutSvg(spec: ChatChartSpec): { svg: string; width: number; height: number } {
+function buildDonutSvg(spec: ExportChartSpec): { svg: string; width: number; height: number } {
   const total = spec.data.reduce((s, d) => s + d.value, 0);
   const slices = spec.data.filter((d) => d.value > 0);
 
@@ -131,7 +142,7 @@ function niceMax(value: number): number {
 }
 
 /** 막대 차트 SVG(세로 막대 + 값 라벨 + x축 라벨 + y축). */
-function buildBarSvg(spec: ChatChartSpec): { svg: string; width: number; height: number } {
+function buildBarSvg(spec: ExportChartSpec): { svg: string; width: number; height: number } {
   const width = 400;
   const height = 260;
   const left = 40;
@@ -176,15 +187,87 @@ function buildBarSvg(spec: ChatChartSpec): { svg: string; width: number; height:
   return { svg: parts.join("\n"), width, height };
 }
 
+/** 라인 차트 SVG(추이) — 영역 채움 + 선 + 포인트 + 값/x축 라벨 + y축. */
+function buildLineSvg(spec: ExportChartSpec): { svg: string; width: number; height: number } {
+  const width = 400;
+  const height = 260;
+  const left = 40;
+  const right = 16;
+  const top = 44;
+  const bottom = 48;
+  const plotW = width - left - right;
+  const plotH = height - top - bottom;
+  const baseY = top + plotH;
+
+  const color = spec.data[0]?.color ?? "#3b82f6";
+  const rawMax = Math.max(...spec.data.map((d) => d.value), 0);
+  const max = rawMax > 0 ? niceMax(rawMax) : 1;
+
+  const parts: string[] = [];
+
+  // y축 눈금선(0, 중간, 최대)과 라벨.
+  for (const t of [0, max / 2, max]) {
+    const y = baseY - (t / max) * plotH;
+    parts.push(
+      `<line x1="${left}" y1="${y.toFixed(1)}" x2="${left + plotW}" y2="${y.toFixed(1)}" stroke="${COLORS.border}" stroke-width="1" />`,
+      `<text x="${left - 6}" y="${y.toFixed(1)}" text-anchor="end" dominant-baseline="central" font-family="${FONT}" font-size="10" fill="${COLORS.muted}">${Number.isInteger(t) ? t : t.toFixed(1)}</text>`
+    );
+  }
+
+  // 각 포인트 좌표(점이 1개면 가운데, 여러 개면 균등 분포).
+  const n = spec.data.length;
+  const px = (i: number) =>
+    n <= 1 ? left + plotW / 2 : left + (plotW / (n - 1)) * i;
+  const py = (v: number) => baseY - (v / max) * plotH;
+  const points = spec.data.map((d, i) => ({ x: px(i), y: py(d.value), d }));
+
+  if (points.length > 0) {
+    // 영역 채움(선 아래).
+    const areaPath =
+      `M ${points[0].x.toFixed(1)} ${baseY} ` +
+      points.map((p) => `L ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" ") +
+      ` L ${points[points.length - 1].x.toFixed(1)} ${baseY} Z`;
+    parts.push(`<path d="${areaPath}" fill="${color}" fill-opacity="0.12" />`);
+
+    // 선.
+    if (points.length > 1) {
+      const linePath =
+        `M ${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)} ` +
+        points
+          .slice(1)
+          .map((p) => `L ${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
+          .join(" ");
+      parts.push(
+        `<path d="${linePath}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />`
+      );
+    }
+
+    // 포인트 + 값 라벨 + x축 라벨.
+    points.forEach((p) => {
+      parts.push(
+        `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3.5" fill="${color}" stroke="${COLORS.bg}" stroke-width="1.5" />`,
+        `<text x="${p.x.toFixed(1)}" y="${(p.y - 9).toFixed(1)}" text-anchor="middle" font-family="${FONT}" font-size="10" font-weight="600" fill="${COLORS.text}">${p.d.value}</text>`,
+        `<text x="${p.x.toFixed(1)}" y="${baseY + 16}" text-anchor="middle" font-family="${FONT}" font-size="10" fill="${COLORS.muted}">${esc(p.d.label)}</text>`
+      );
+    });
+  }
+
+  return { svg: parts.join("\n"), width, height };
+}
+
 /** 차트 스펙으로부터 독립적인 SVG 문서 문자열을 만듭니다. */
-export function buildChartSvg(spec: ChatChartSpec): {
+export function buildChartSvg(spec: ExportChartSpec): {
   svg: string;
   width: number;
   height: number;
 } {
   const titleH = 36;
   const body =
-    spec.kind === "donut" ? buildDonutSvg(spec) : buildBarSvg(spec);
+    spec.kind === "donut"
+      ? buildDonutSvg(spec)
+      : spec.kind === "line"
+        ? buildLineSvg(spec)
+        : buildBarSvg(spec);
   const width = body.width;
   const height = body.height + titleH;
 
@@ -249,7 +332,7 @@ function svgToPngBlob(
 }
 
 /** 차트를 PNG 파일로 저장합니다. */
-export async function downloadChartPng(spec: ChatChartSpec): Promise<void> {
+export async function downloadChartPng(spec: ExportChartSpec): Promise<void> {
   const { svg, width, height } = buildChartSvg(spec);
   const blob = await svgToPngBlob(svg, width, height);
   const url = URL.createObjectURL(blob);

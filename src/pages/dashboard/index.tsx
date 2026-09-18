@@ -24,7 +24,9 @@ import {
 } from "@dnd-kit/sortable";
 
 import { Badge } from "@/components/ui/badge";
+import ChartDownloadButton from "@/components/chart-download-button";
 import { cn } from "@/lib/utils";
+import type { ExportChartSpec } from "@/lib/chart-export";
 import {
   actionOverdueDays,
   useAllActions,
@@ -312,6 +314,40 @@ export default function DashboardPage() {
       .slice(0, 6);
   }, [allActions]);
 
+  // 차트 패널 다운로드용 스펙(현재 화면 데이터·선택 기간을 그대로 PNG로 저장).
+  const trendSpec: ExportChartSpec = {
+    title: "월별 품질 이벤트 등록 추이",
+    kind: "line",
+    data: trend.map((d) => ({ label: d.label, value: d.count, color: "#3b82f6" })),
+  };
+  const ncVerdictSpec: ExportChartSpec = {
+    title: "부적합 CAPA 판정 분포",
+    kind: "donut",
+    data: ncVerdictData.map((d) => ({
+      label: d.label,
+      value: d.value,
+      color: d.color,
+    })),
+  };
+  const pipelineSpec: ExportChartSpec = {
+    title: "CAPA 진행 파이프라인",
+    kind: "donut",
+    data: capaBars.map((b) => ({
+      label: b.label,
+      value: b.value,
+      color: b.color,
+    })),
+  };
+  const assigneeLoadSpec: ExportChartSpec = {
+    title: "담당자별 진행중 조치",
+    kind: "bar",
+    data: assigneeLoad.map((d) => ({
+      label: d.name,
+      value: d.value,
+      color: "#8b5cf6",
+    })),
+  };
+
   // 각 패널의 제목·액션·본문 정의. 순서 배열(order)에 따라 렌더합니다.
   const panels: Record<
     PanelId,
@@ -349,7 +385,15 @@ export default function DashboardPage() {
     },
     pipeline: {
       title: "CAPA 진행 파이프라인",
-      action: <MoreLink onClick={() => navigate("/capa/status")} />,
+      action: (
+        <div className="flex items-center gap-2.5">
+          <ChartDownloadButton
+            spec={pipelineSpec}
+            label="CAPA 진행 파이프라인 다운로드"
+          />
+          <MoreLink onClick={() => navigate("/capa/status")} />
+        </div>
+      ),
       content: (
         <div className="flex flex-wrap items-center gap-5">
           <MiniDonut items={capaBars} centerLabel="진행중" size={200} />
@@ -365,7 +409,15 @@ export default function DashboardPage() {
     },
     ncVerdict: {
       title: "부적합 CAPA 판정 분포",
-      action: <MoreLink onClick={() => navigate("/nonconformities/list")} />,
+      action: (
+        <div className="flex items-center gap-2.5">
+          <ChartDownloadButton
+            spec={ncVerdictSpec}
+            label="부적합 CAPA 판정 분포 다운로드"
+          />
+          <MoreLink onClick={() => navigate("/nonconformities/list")} />
+        </div>
+      ),
       content: (
         <ProportionBar
           items={ncVerdictData}
@@ -376,6 +428,12 @@ export default function DashboardPage() {
     },
     trend: {
       title: "월별 품질 이벤트 등록 추이",
+      action: (
+        <ChartDownloadButton
+          spec={trendSpec}
+          label="월별 품질 이벤트 등록 추이 다운로드"
+        />
+      ),
       content: (
         <div className="flex flex-col gap-3">
           {monthOptions.length > 0 && trendStart && trendEnd && (
@@ -401,7 +459,15 @@ export default function DashboardPage() {
     },
     assigneeLoad: {
       title: "담당자별 진행중 조치",
-      action: <MoreLink onClick={() => navigate("/actions/status")} />,
+      action: (
+        <div className="flex items-center gap-2.5">
+          <ChartDownloadButton
+            spec={assigneeLoadSpec}
+            label="담당자별 진행중 조치 다운로드"
+          />
+          <MoreLink onClick={() => navigate("/actions/status")} />
+        </div>
+      ),
       content: <AssigneeLoadChart data={assigneeLoad} />,
     },
     delayed: {
