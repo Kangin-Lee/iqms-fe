@@ -291,7 +291,7 @@ export function AppSidebar() {
             <SidebarMenuButton
               tooltip="로그아웃"
               onClick={handleLogout}
-              className="mt-2 bg-white flex justify-center hover:bg-destructive/10 hover:text-destructive active:bg-destructive/10 active:text-destructive group-data-[collapsible=icon]:justify-center transition-colors"
+              className="mt-2 bg-white text-neutral-900 flex justify-center hover:bg-destructive/10 hover:text-destructive active:bg-destructive/10 active:text-destructive group-data-[collapsible=icon]:justify-center transition-colors"
             >
               <LogOut className="size-4 shrink-0" />
               <span className="group-data-[collapsible=icon]:hidden">
