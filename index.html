@@ -5,6 +5,20 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>IQMS - 지능형 품질경영시스템</title>
+    <script>
+      // 앱 로드 전에 테마 클래스를 먼저 적용해 다크모드 깜빡임(FOUC)을 막습니다.
+      (function () {
+        try {
+          var t = localStorage.getItem("iqms-theme");
+          if (t !== "light" && t !== "dark") {
+            t = window.matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+          }
+          if (t === "dark") document.documentElement.classList.add("dark");
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

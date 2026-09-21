@@ -1,6 +1,8 @@
 import { useState } from "react";
-import { ChevronRight, Home, LogOut, UserRound } from "lucide-react";
+import { ChevronRight, LogOut, UserRound } from "lucide-react";
 import { NavLink, useLocation, useNavigate } from "react-router";
+
+import { Logo } from "@/components/logo";
 
 import {
   Collapsible,
@@ -71,7 +73,7 @@ function isItemActive(pathname: string, item: SidebarMenuItemType) {
 function resolveActiveUrl(
   items: SidebarMenuItemType[],
   pathname: string,
-  search: string
+  search: string,
 ): string | null {
   const direct = items.find((item) => matchesPath(pathname, item.url));
   if (direct) return direct.url;
@@ -85,8 +87,8 @@ function resolveActiveUrl(
   }
 
   // from이 없는 직접 진입(북마크·새로고침)만 activePaths 규칙으로 폴백합니다.
-  const claimed = items.find(
-    (item) => item.activePaths?.some((path) => matchesPath(pathname, path))
+  const claimed = items.find((item) =>
+    item.activePaths?.some((path) => matchesPath(pathname, path)),
   );
   return claimed?.url ?? null;
 }
@@ -211,9 +213,7 @@ export function AppSidebar() {
               className="group-data-[collapsible=icon]:justify-center"
               render={<NavLink to="/" />}
             >
-              <div className="flex aspect-square size-8 shrink-0 items-center justify-center rounded-md bg-sidebar-primary text-sidebar-primary-foreground">
-                <Home className="size-4" />
-              </div>
+              <Logo />
 
               <div className="grid min-w-0 flex-1 text-left text-sm leading-tight group-data-[collapsible=icon]:hidden">
                 <span className="truncate font-semibold">IQMS</span>
@@ -233,33 +233,33 @@ export function AppSidebar() {
               {sidebarMenuItems
                 .filter((item) => !item.hidden)
                 .map((item) => {
-                if (item.children && item.children.length > 0) {
+                  if (item.children && item.children.length > 0) {
+                    return (
+                      <CollapsibleMenuItem
+                        key={item.url}
+                        item={item}
+                        pathname={pathname}
+                        search={search}
+                        badgeCounts={badgeCounts}
+                      />
+                    );
+                  }
+
+                  const active = isItemActive(pathname, item);
+
                   return (
-                    <CollapsibleMenuItem
-                      key={item.url}
-                      item={item}
-                      pathname={pathname}
-                      search={search}
-                      badgeCounts={badgeCounts}
-                    />
+                    <SidebarMenuItem key={item.url}>
+                      <SidebarMenuButton
+                        isActive={active}
+                        tooltip={item.title}
+                        render={<NavLink to={item.url} />}
+                      >
+                        {item.icon ? <item.icon /> : null}
+                        <span>{item.title}</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
                   );
-                }
-
-                const active = isItemActive(pathname, item);
-
-                return (
-                  <SidebarMenuItem key={item.url}>
-                    <SidebarMenuButton
-                      isActive={active}
-                      tooltip={item.title}
-                      render={<NavLink to={item.url} />}
-                    >
-                      {item.icon ? <item.icon /> : null}
-                      <span>{item.title}</span>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                );
-              })}
+                })}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
@@ -300,6 +300,12 @@ export function AppSidebar() {
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
+        <p className="whitespace-nowrap text-center text-xs text-muted-foreground">
+          <span className="group-data-[collapsible=icon]:hidden">
+            © IOPS Inc. IQMS. All rights reserved.
+          </span>
+          <span className="hidden group-data-[collapsible=icon]:inline">©</span>
+        </p>
       </SidebarFooter>
 
       <SidebarRail />

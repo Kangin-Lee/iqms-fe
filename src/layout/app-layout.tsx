@@ -4,8 +4,10 @@ import { SquarePen } from "lucide-react";
 import { AppBreadcrumb } from "@/components/app-breadcrumb";
 import { AppSidebar } from "@/components/app-sidebar";
 import { ChatPanel } from "@/components/chat-panel";
-import { HeaderUserStatus } from "@/components/header-user-status";
+import { CommandPalette } from "@/components/command-palette";
+import { HeaderUserMenu } from "@/components/header-user-menu";
 import { NotificationBell } from "@/components/notification-bell";
+import { ThemeToggle } from "@/components/theme-toggle";
 import {
   ResizableHandle,
   ResizablePanel,
@@ -34,8 +36,10 @@ export function AppLayout() {
         <AppBreadcrumb />
 
         <div className="ml-auto flex items-center gap-2">
+          <CommandPalette />
+          <ThemeToggle />
           <NotificationBell />
-          <HeaderUserStatus />
+          <HeaderUserMenu />
         </div>
       </header>
 
