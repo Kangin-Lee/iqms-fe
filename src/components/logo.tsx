@@ -49,20 +49,32 @@ export function LogoMark({ className }: LogoMarkProps) {
 }
 
 type LogoProps = {
-  /** 타일(배경 배지) 없이 마크만 렌더합니다. */
-  bare?: boolean;
+  /** true면 네이비 배경 타일에 담아 렌더합니다. 기본은 타일 없이 마크만. */
+  tile?: boolean;
   className?: string;
 };
 
 /**
- * 타일에 담긴 로고(사이드바 헤더용).
- * 브랜드 네이비 타일 + 흰 코어 + 크림슨 궤도. bare=true면 마크만 반환합니다.
+ * 사이드바 헤더용 로고. 배경 타일 없이 마크만 렌더합니다.
+ * 코어는 currentColor(사이드바 글자색)를 따르고, 궤도·노드는 브랜드 색입니다.
+ * (tile=true면 이전처럼 네이비 배경 타일에 담아 렌더합니다.)
  */
-export function Logo({ bare = false, className }: LogoProps) {
-  if (bare) return <LogoMark className={className} />;
+export function Logo({ tile = false, className }: LogoProps) {
+  if (tile) {
+    return (
+      <div className="flex aspect-square size-8 shrink-0 items-center justify-center rounded-md bg-[#13234d] text-white">
+        <LogoMark className="size-5" />
+      </div>
+    );
+  }
+  // SidebarMenuButton이 하위 모든 svg를 [&_svg]:size-4로 16px 고정하므로,
+  // Tailwind v4 important(!)로 눌러 실제 크기를 반영합니다.
+  // 접힘(collapsed) 상태에서는 32px 버튼에 맞게 줄입니다.
   return (
-    <div className="flex aspect-square size-8 shrink-0 items-center justify-center rounded-md bg-[#13234d] text-white">
-      <LogoMark className="size-5" />
-    </div>
+    <LogoMark
+      className={
+        className ?? "size-11! group-data-[collapsible=icon]:size-7! shrink-0"
+      }
+    />
   );
 }
