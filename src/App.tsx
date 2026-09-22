@@ -12,6 +12,7 @@ import QualityEventRegister from "./pages/quailty-event/quailty-event-register";
 import CapaStatusDetail from "./pages/capa-management/capa-status/detail";
 import ChangeRequestDetail from "./pages/change-request-management/change-request-detail";
 import ChangeRequestRegister from "./pages/change-request-management/change-request-register";
+import SettingsPage from "./pages/settings";
 import { Toaster } from "./components/ui/toast";
 import type { ComponentType } from "react";
 
@@ -78,6 +79,9 @@ function App() {
             path="/quality-events/register/:id"
             element={<QualityEventRegister />}
           />
+
+          {/* 관리자 설정 (헤더 프로필 메뉴 → 설정) */}
+          <Route path="/settings" element={<SettingsPage />} />
 
           {routes.map(({ url, title, description, component: Page }) => {
             const element =

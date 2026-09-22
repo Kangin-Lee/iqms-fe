@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronDown, LogOut, User } from "lucide-react";
+import { ChevronDown, LogOut, Settings, User } from "lucide-react";
 import { useNavigate } from "react-router";
 
 import {
@@ -119,6 +119,13 @@ export function HeaderUserMenu({
           <User />
           마이페이지
         </DropdownMenuItem>
+        {/* 설정은 관리자에게만 노출 */}
+        {currentUser.isAdmin && (
+          <DropdownMenuItem onClick={() => navigate("/settings")}>
+            <Settings />
+            설정
+          </DropdownMenuItem>
+        )}
         <DropdownMenuItem variant="destructive" onClick={() => navigate("/login")}>
           <LogOut />
           로그아웃

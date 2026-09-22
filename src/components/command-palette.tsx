@@ -167,7 +167,7 @@ export function CommandPalette() {
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="hidden h-9 w-56 cursor-pointer items-center gap-2 rounded-md border bg-muted/40 px-3 text-sm text-muted-foreground outline-hidden transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring md:flex"
+        className="hidden h-9 w-56 cursor-pointer items-center gap-2 rounded-md border bg-white px-3 text-sm text-muted-foreground outline-hidden transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring md:flex dark:bg-zinc-900"
       >
         <Search className="size-4 shrink-0" />
         <span className="flex-1 text-left">검색…</span>
@@ -193,9 +193,9 @@ export function CommandPalette() {
         >
           <DialogTitle className="sr-only">통합 검색</DialogTitle>
 
-          {/* 검색 입력 */}
-          <div className="flex items-center gap-2 border-b px-3">
-            <Search className="size-4 shrink-0 text-muted-foreground" />
+          {/* 검색 입력 (배경 흰색 고정) */}
+          <div className="flex items-center gap-2 border-b bg-white px-3">
+            <Search className="size-4 shrink-0 text-neutral-500" />
             <input
               ref={inputRef}
               autoFocus
@@ -203,7 +203,7 @@ export function CommandPalette() {
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={handleInputKeyDown}
               placeholder="메뉴, 품질 이벤트 번호·제목으로 검색…"
-              className="h-11 flex-1 bg-transparent text-sm outline-hidden placeholder:text-muted-foreground"
+              className="h-11 flex-1 bg-transparent text-sm text-neutral-900 outline-hidden placeholder:text-neutral-400"
             />
           </div>
 
