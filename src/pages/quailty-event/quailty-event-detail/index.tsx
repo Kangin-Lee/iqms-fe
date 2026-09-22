@@ -460,7 +460,7 @@ function QualityEventDetailContent({ event }: { event: QualityEvent }) {
   }
 
   return (
-    <div className="mx-auto flex h-full w-full max-w-5xl flex-col gap-4">
+    <div className="mx-auto flex min-h-full w-full max-w-5xl flex-col gap-4">
       {/* 헤더 */}
       <div className="flex shrink-0 flex-col gap-3">
         {/* 목록으로 (상단) */}
@@ -634,10 +634,10 @@ function QualityEventDetailContent({ event }: { event: QualityEvent }) {
           // toolbar=1: 브라우저 내장 뷰어의 확대/인쇄 등 도구 노출
           src={`${pdfInstance.url}#toolbar=1`}
           title={`${event.eventNumber} 문서`}
-          className="min-h-0 w-full flex-1 rounded-lg border bg-card"
+          className="min-h-[640px] w-full flex-1 rounded-lg border bg-card"
         />
       ) : (
-        <div className="flex min-h-0 w-full flex-1 items-center justify-center rounded-lg border bg-card text-sm text-muted-foreground">
+        <div className="flex min-h-[640px] w-full flex-1 items-center justify-center rounded-lg border bg-card text-sm text-muted-foreground">
           {pdfInstance.error
             ? "문서를 생성하지 못했습니다."
             : "문서를 불러오는 중…"}
